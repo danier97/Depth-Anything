@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
 
-from depth_anything.blocks import FeatureFusionBlock, _make_scratch
+from .blocks import FeatureFusionBlock, _make_scratch
 
 
 def _make_fusion_block(features, use_bn, size = None):
@@ -117,27 +117,28 @@ class DPTHead(nn.Module):
             
             out.append(x)
         
-        layer_1, layer_2, layer_3, layer_4 = out
         
-        layer_1_rn = self.scratch.layer1_rn(layer_1)
-        layer_2_rn = self.scratch.layer2_rn(layer_2)
-        layer_3_rn = self.scratch.layer3_rn(layer_3)
-        layer_4_rn = self.scratch.layer4_rn(layer_4)
+        # layer_1, layer_2, layer_3, layer_4 = out
         
-        path_4 = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
-        path_3 = self.scratch.refinenet3(path_4, layer_3_rn, size=layer_2_rn.shape[2:])
-        path_2 = self.scratch.refinenet2(path_3, layer_2_rn, size=layer_1_rn.shape[2:])
-        path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
+        # layer_1_rn = self.scratch.layer1_rn(layer_1)
+        # layer_2_rn = self.scratch.layer2_rn(layer_2)
+        # layer_3_rn = self.scratch.layer3_rn(layer_3)
+        # layer_4_rn = self.scratch.layer4_rn(layer_4)
         
-        out = self.scratch.output_conv1(path_1)
-        out = F.interpolate(out, (int(patch_h * 14), int(patch_w * 14)), mode="bilinear", align_corners=True)
-        out = self.scratch.output_conv2(out)
+        # path_4 = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
+        # path_3 = self.scratch.refinenet3(path_4, layer_3_rn, size=layer_2_rn.shape[2:])
+        # path_2 = self.scratch.refinenet2(path_3, layer_2_rn, size=layer_1_rn.shape[2:])
+        # path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
+        
+        # out = self.scratch.output_conv1(path_1)
+        # out = F.interpolate(out, (int(patch_h * 14), int(patch_w * 14)), mode="bilinear", align_corners=True)
+        # out = self.scratch.output_conv2(out)
         
         return out
         
         
 class DPT_DINOv2(nn.Module):
-    def __init__(self, encoder='vitl', features=256, out_channels=[256, 512, 1024, 1024], use_bn=False, use_clstoken=False, localhub=True):
+    def __init__(self, encoder='vitl', features=256, out_channels=[256, 512, 1024, 1024], use_bn=False, use_clstoken=False, localhub=not True):
         super(DPT_DINOv2, self).__init__()
         
         assert encoder in ['vits', 'vitb', 'vitl']
@@ -146,7 +147,7 @@ class DPT_DINOv2(nn.Module):
         if localhub:
             self.pretrained = torch.hub.load('torchhub/facebookresearch_dinov2_main', 'dinov2_{:}14'.format(encoder), source='local', pretrained=False)
         else:
-            self.pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_{:}14'.format(encoder))
+            self.pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_{:}14'.format(encoder), pretrained=False)
         
         dim = self.pretrained.blocks[0].attn.qkv.in_features
         
@@ -160,16 +161,41 @@ class DPT_DINOv2(nn.Module):
         patch_h, patch_w = h // 14, w // 14
 
         depth = self.depth_head(features, patch_h, patch_w)
-        depth = F.interpolate(depth, size=(h, w), mode="bilinear", align_corners=True)
-        depth = F.relu(depth)
+        # depth = F.interpolate(depth, size=(h, w), mode="bilinear", align_corners=True)
+        # depth = F.relu(depth)
+        return features #, depth #depth.squeeze(1)
 
-        return depth.squeeze(1)
-
+class DINOv2(nn.Module):
+    def __init__(self, encoder='vitl', features=256, out_channels=[256, 512, 1024, 1024], use_bn=False, use_clstoken=False, localhub=not True):
+        super(DINOv2, self).__init__()
+        
+        assert encoder in ['vits', 'vitb', 'vitl']
+        
+        # in case the Internet connection is not stable, please load the DINOv2 locally
+        if localhub:
+            self.pretrained = torch.hub.load('torchhub/facebookresearch_dinov2_main', 'dinov2_{:}14'.format(encoder), source='local', pretrained=False)
+        else:
+            self.pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_{:}14'.format(encoder), pretrained=True)
+        
+        
+    def forward(self, x):
+        h, w = x.shape[-2:]
+        
+        features = self.pretrained.get_intermediate_layers(x, 4, return_class_token=True)
+        
+        return features
+    
+    def full_forward(self, x):
+        features = self.pretrained(x)
+        return features
 
 class DepthAnything(DPT_DINOv2, PyTorchModelHubMixin):
     def __init__(self, config):
         super().__init__(**config)
 
+class DepthAnythingEncoder(DINOv2, PyTorchModelHubMixin):
+    def __init__(self, config):
+        super().__init__(**config)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -179,9 +205,19 @@ if __name__ == '__main__':
         type=str,
         choices=["vits", "vitb", "vitl"],
     )
+    parser.add_argument(
+        '--only-encoder',
+        default = 'vits',
+        type = str,
+        choice = ['vits', 'vitl', 'vitb']
+    )
+
     args = parser.parse_args()
     
-    model = DepthAnything.from_pretrained("LiheYoung/depth_anything_{:}14".format(args.encoder))
+    if args.only_encoder:
+        model = DepthAnythingEncoder.from_pretrained("LiheYoung/depth_anything_{:}14".format(args.encoder))
+    else:                                              
+        model = DepthAnything.from_pretrained("LiheYoung/depth_anything_{:}14".format(args.encoder))
     
     print(model)
     
